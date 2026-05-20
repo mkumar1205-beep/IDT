@@ -30,7 +30,11 @@ if uploaded_file is not None:
 
     with st.spinner("Analysing road surface..."):
         damage_contours, annotated_img, stats = detect_damage(img_array)
-        score, label, color = quality_score(stats["pothole_count"], stats["damage_area_pct"])
+        score, label, color = quality_score(
+            stats["pothole_count"],
+            stats["damage_area_pct"],
+            stats["severity"],
+        )
 
     with col_upload:
         tab1, tab2 = st.tabs(["Detected damage", "Original"])
@@ -51,7 +55,7 @@ if uploaded_file is not None:
             <div style="color:#888;font-size:0.8rem;text-transform:uppercase;">Road Quality Score</div>
             <div style="font-size:3.5rem;font-weight:700;color:{color};">{score}</div>
             <div style="font-size:1.1rem;font-weight:600;color:{color};text-transform:uppercase;">{label}</div>
-            <div style="font-size:0.8rem;color:#888;margin-top:0.4rem;">Score = min(100 - 8 x potholes, 100 - 1.5 x damage%)</div>
+            <div style="font-size:0.8rem;color:#888;margin-top:0.4rem;">Score uses pothole count, damage area, and severity</div>
         </div>""", unsafe_allow_html=True)
 
         st.markdown(f"""

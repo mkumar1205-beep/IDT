@@ -1,22 +1,35 @@
-def quality_score(pothole_count: int, damage_area_pct: float) -> tuple[int, str, str]:
+from typing import Optional
+
+
+def quality_score(
+    pothole_count: int,
+    damage_area_pct: float,
+    severity_counts: Optional[dict] = None,
+) -> tuple[int, str, str]:
     """
     Calculate road quality score.
 
-    Uses two independent signals and takes the worse of the two:
-      - Count penalty:  each pothole subtracts heavily
-      - Area penalty:   damage spread is weighted strongly
-
-    This prevents a road with many potholes OR large damage
-    from being rated Good.
+    Uses count, area, and severity so a road with confirmed potholes
+    cannot still be rated Good just because the damaged area is small.
     """
-    # Penalty from pothole count (each pothole = -8 points)
-    count_score = max(0, 100 - (pothole_count * 8))
+    severity_counts = severity_counts or {}
+    small = severity_counts.get("small", 0)
+    medium = severity_counts.get("medium", 0)
+    large = severity_counts.get("large", 0)
 
-    # Penalty from damage area (each % of damage = -1.5 points)
-    area_score = max(0, 100 - (damage_area_pct * 1.5))
+    if not severity_counts and pothole_count:
+        small = pothole_count
 
-    # Take the WORSE of the two signals
-    score = int(min(count_score, area_score))
+    severity_penalty = (small * 12) + (medium * 22) + (large * 35)
+    area_penalty = damage_area_pct * 2.5
+    score = max(0, int(100 - severity_penalty - area_penalty))
+
+    if pothole_count > 0:
+        score = min(score, 74)
+    if medium > 0 or pothole_count >= 2 or damage_area_pct >= 2:
+        score = min(score, 69)
+    if large > 0 or pothole_count >= 4 or damage_area_pct >= 6:
+        score = min(score, 44)
 
     if score >= 75:
         return score, "Good", "#1D9E75"
