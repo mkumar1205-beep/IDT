@@ -13,6 +13,16 @@ except ModuleNotFoundError:
 
 @unittest.skipIf(detect_damage is None, "OpenCV is not installed")
 class DetectorTests(unittest.TestCase):
+    def test_smooth_clean_road_has_no_damage(self):
+        image = np.full((220, 340, 3), 140, dtype=np.uint8)
+        image[:70, :] = (190, 190, 190)
+        cv2.rectangle(image, (0, 80), (340, 220), (130, 130, 130), -1)
+
+        _, _, stats = detect_damage(image)
+
+        self.assertEqual(stats["pothole_count"], 0)
+        self.assertEqual(stats["damage_area_pct"], 0.0)
+
     def test_dark_water_filled_pothole_is_detected(self):
         image = np.full((220, 340, 3), 155, dtype=np.uint8)
 

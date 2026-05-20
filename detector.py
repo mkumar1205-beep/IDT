@@ -34,6 +34,8 @@ def _road_surface_mask(img_bgr: np.ndarray, h: int) -> np.ndarray:
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
     road_mask = cv2.morphologyEx(road_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+    if cv2.countNonZero(road_mask) < int(gray_surface.size * 0.08):
+        road_mask[int(h * 0.35):, :] = 255
     return road_mask
 
 
@@ -41,6 +43,46 @@ def _threshold_from_roi(values: np.ndarray, default: int, percentile: int) -> in
     if values.size == 0:
         return default
     return max(default, int(np.percentile(values, percentile)))
+
+
+def _surface_damage_mask(
+    gray: np.ndarray,
+    road_mask: np.ndarray,
+    edge_mask: np.ndarray,
+    texture_mask: np.ndarray,
+    total_pixels: int,
+) -> np.ndarray:
+    h, w = gray.shape[:2]
+    blur_size = _odd(min(h, w) * 0.18, 21, 71)
+    local_background = cv2.GaussianBlur(gray, (blur_size, blur_size), 0)
+    contrast = cv2.absdiff(gray, local_background)
+
+    road_values = contrast[road_mask > 0]
+    contrast_threshold = _threshold_from_roi(road_values, 14, 72)
+    _, contrast_mask = cv2.threshold(
+        contrast, contrast_threshold, 255, cv2.THRESH_BINARY
+    )
+
+    sobel_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    gradient = cv2.magnitude(sobel_x, sobel_y)
+    gradient = cv2.normalize(gradient, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    road_gradient_values = gradient[road_mask > 0]
+    gradient_threshold = _threshold_from_roi(road_gradient_values, 22, 70)
+    _, gradient_mask = cv2.threshold(
+        gradient, gradient_threshold, 255, cv2.THRESH_BINARY
+    )
+
+    damaged_texture = cv2.bitwise_or(edge_mask, texture_mask)
+    damaged_texture = cv2.bitwise_or(damaged_texture, gradient_mask)
+    surface_mask = cv2.bitwise_and(contrast_mask, damaged_texture)
+    surface_mask = cv2.bitwise_and(surface_mask, road_mask)
+
+    kernel_size = _odd(min(h, w) * 0.055, 5, 21)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    surface_mask = cv2.morphologyEx(surface_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    surface_mask = cv2.morphologyEx(surface_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    return _fill_contours(surface_mask, max(20, int(total_pixels * 0.00025)))
 
 
 def _is_damage_candidate(contour: np.ndarray, gray: np.ndarray, total_pixels: int) -> bool:
@@ -180,6 +222,9 @@ def detect_damage(image_array: np.ndarray):
     rough_surface_mask = _fill_contours(
         rough_surface_mask, max(15, int(total_pixels * 0.00025))
     )
+    surface_damage_mask = _surface_damage_mask(
+        gray, road_mask, edge_mask, texture_mask, total_pixels
+    )
 
     vote = (
         (adaptive_dark > 0).astype(np.uint8)
@@ -190,6 +235,7 @@ def detect_damage(image_array: np.ndarray):
     fused = np.where(vote >= 2, 255, 0).astype(np.uint8)
     fused = cv2.bitwise_or(fused, depression_mask)
     fused = cv2.bitwise_or(fused, rough_surface_mask)
+    fused = cv2.bitwise_or(fused, surface_damage_mask)
 
     close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
     open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -203,6 +249,35 @@ def detect_damage(image_array: np.ndarray):
         for contour in contours
         if _is_damage_candidate(contour, gray, total_pixels)
     ]
+
+    road_pixels = max(cv2.countNonZero(road_mask), 1)
+    surface_damage_ratio = cv2.countNonZero(surface_damage_mask) / float(road_pixels)
+    if not damage_contours and surface_damage_ratio >= 0.015:
+        fallback_contours, _ = cv2.findContours(
+            surface_damage_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        damage_contours = [
+            contour
+            for contour in fallback_contours
+            if cv2.contourArea(contour) >= max(40, int(total_pixels * 0.00035))
+        ]
+
+    if not damage_contours and surface_damage_ratio >= 0.04:
+        points = cv2.findNonZero(surface_damage_mask)
+        if points is not None:
+            x, y, bw, bh = cv2.boundingRect(points)
+            damage_contours = [
+                np.array(
+                    [
+                        [[x, y]],
+                        [[x + bw, y]],
+                        [[x + bw, y + bh]],
+                        [[x, y + bh]],
+                    ],
+                    dtype=np.int32,
+                )
+            ]
+
     damage_contours.sort(key=cv2.contourArea, reverse=True)
 
     annotated = img_bgr.copy()
