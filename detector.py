@@ -17,6 +17,32 @@ def _fill_contours(mask: np.ndarray, min_area: int) -> np.ndarray:
     return filled
 
 
+def _road_surface_mask(img_bgr: np.ndarray, h: int) -> np.ndarray:
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    saturation = hsv[:, :, 1]
+    value = hsv[:, :, 2]
+
+    gray_surface = (
+        (saturation < 115)
+        & (value > 30)
+        & (value < 245)
+    ).astype(np.uint8) * 255
+
+    roi = np.zeros_like(gray_surface)
+    roi[int(h * 0.35):, :] = 255
+    road_mask = cv2.bitwise_and(gray_surface, roi)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    road_mask = cv2.morphologyEx(road_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+    return road_mask
+
+
+def _threshold_from_roi(values: np.ndarray, default: int, percentile: int) -> int:
+    if values.size == 0:
+        return default
+    return max(default, int(np.percentile(values, percentile)))
+
+
 def _is_damage_candidate(contour: np.ndarray, gray: np.ndarray, total_pixels: int) -> bool:
     area = cv2.contourArea(contour)
     min_area = max(60, int(total_pixels * 0.001))
@@ -53,18 +79,21 @@ def _is_damage_candidate(contour: np.ndarray, gray: np.ndarray, total_pixels: in
 
     local_median = float(np.median(local))
     candidate_dark_value = float(np.percentile(inside, 25))
-    local_contrast = local_median - candidate_dark_value
+    candidate_bright_value = float(np.percentile(inside, 75))
+    dark_contrast = local_median - candidate_dark_value
+    bright_contrast = candidate_bright_value - local_median
 
-    return local_contrast >= 8 or float(np.std(inside)) >= 18
+    return max(dark_contrast, bright_contrast) >= 8 or float(np.std(inside)) >= 18
 
 
 def detect_damage(image_array: np.ndarray):
     """
     Detect pothole-like road damage with texture, edge, and dark-depression cues.
 
-    The dark-depression cue is important for images where the pothole is a dark
-    rim around a bright water/reflective center. The older detector often erased
-    that thin rim during cleanup and then reported zero potholes.
+    Bright and dark road-surface patch cues are important for images where the
+    road has water-filled potholes, patchy broken asphalt, or reflective pits.
+    The older detector often erased these regions during cleanup and then
+    reported zero potholes.
     """
     img_bgr = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
     h, w = img_bgr.shape[:2]
@@ -103,6 +132,7 @@ def detect_damage(image_array: np.ndarray):
     dark_cutoff = int(np.percentile(blur, 22))
     dark_cutoff = max(45, min(125, dark_cutoff))
     global_dark = cv2.inRange(blur, 0, dark_cutoff)
+    road_mask = _road_surface_mask(img_bgr, h)
 
     blackhat_size = _odd(min(h, w) * 0.14, 17, 61)
     blackhat_kernel = cv2.getStructuringElement(
@@ -112,6 +142,17 @@ def detect_damage(image_array: np.ndarray):
     blackhat_threshold = max(8, int(np.percentile(blackhat, 85)))
     _, blackhat_mask = cv2.threshold(
         blackhat, blackhat_threshold, 255, cv2.THRESH_BINARY
+    )
+
+    whitehat_size = _odd(min(h, w) * 0.12, 15, 51)
+    whitehat_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (whitehat_size, whitehat_size)
+    )
+    whitehat = cv2.morphologyEx(blur, cv2.MORPH_TOPHAT, whitehat_kernel)
+    road_whitehat_values = whitehat[road_mask > 0]
+    whitehat_threshold = _threshold_from_roi(road_whitehat_values, 10, 84)
+    _, whitehat_mask = cv2.threshold(
+        whitehat, whitehat_threshold, 255, cv2.THRESH_BINARY
     )
 
     dark_with_edges = cv2.bitwise_and(global_dark, cv2.bitwise_or(edge_mask, blackhat_mask))
@@ -127,6 +168,19 @@ def detect_damage(image_array: np.ndarray):
     )
     depression_mask = _fill_contours(depression_mask, max(20, int(total_pixels * 0.0004)))
 
+    rough_surface_mask = cv2.bitwise_or(blackhat_mask, whitehat_mask)
+    rough_surface_mask = cv2.bitwise_or(
+        rough_surface_mask,
+        cv2.bitwise_and(density_mask, texture_mask),
+    )
+    rough_surface_mask = cv2.bitwise_and(rough_surface_mask, road_mask)
+    rough_surface_mask = cv2.morphologyEx(
+        rough_surface_mask, cv2.MORPH_CLOSE, bridge_kernel, iterations=2
+    )
+    rough_surface_mask = _fill_contours(
+        rough_surface_mask, max(15, int(total_pixels * 0.00025))
+    )
+
     vote = (
         (adaptive_dark > 0).astype(np.uint8)
         + (density_mask > 0).astype(np.uint8)
@@ -135,6 +189,7 @@ def detect_damage(image_array: np.ndarray):
     )
     fused = np.where(vote >= 2, 255, 0).astype(np.uint8)
     fused = cv2.bitwise_or(fused, depression_mask)
+    fused = cv2.bitwise_or(fused, rough_surface_mask)
 
     close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
     open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
